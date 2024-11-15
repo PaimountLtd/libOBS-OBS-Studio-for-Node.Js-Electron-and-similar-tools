@@ -56,7 +56,9 @@ std::string AdvancedRecordingAudioEncodersID[MAX_AUDIO_MIXES];
 
 obs_video_info *base_canvas = nullptr;
 
+// Audio encoders
 const std::string ffmpeg_aac_id = "ffmpeg_aac";
+const std::string ffmpeg_opus_id = "ffmpeg_opus";
 std::string audioSimpleRecEncID;
 
 std::string videoEncoder;
@@ -801,7 +803,7 @@ bool OBS_service::createVideoStreamingEncoder(StreamServiceId serviceId)
 	return true;
 }
 
-void OBS_service::createAudioStreamingEncoder(StreamServiceId serviceId, bool isSimpleMode)
+void OBS_service::createAudioStreamingEncoder(StreamServiceId serviceId, bool isSimpleMode, const std::string &encoder_id)
 {
 	std::string id;
 	obs_encoder_t *audioStreamingEncoder = nullptr;
@@ -813,7 +815,7 @@ void OBS_service::createAudioStreamingEncoder(StreamServiceId serviceId, bool is
 		trackIndex = config_get_int(ConfigManager::getInstance().getBasic(), "AdvOut", "TrackIndex") - 1;
 	}
 
-	if (!createAudioEncoder(&audioStreamingEncoder, id, ffmpeg_aac_id, GetSimpleAudioBitrate(), audio_encoder_name.c_str(), trackIndex)) {
+	if (!createAudioEncoder(&audioStreamingEncoder, id, encoder_id, GetSimpleAudioBitrate(), audio_encoder_name.c_str(), trackIndex)) {
 		throw "Failed to create audio streaming encoder";
 	}
 
@@ -1237,6 +1239,7 @@ bool OBS_service::startStreaming(StreamServiceId serviceId)
 
 	obs_output_set_video_encoder(streamingOutput[serviceId], videoStreamingEncoder[serviceId]);
 	obs_output_set_audio_encoder(streamingOutput[serviceId], audioStreamingEncoder[serviceId], 0);
+	obs_encoder_set_video_mix(audioStreamingEncoder[serviceId], obs_video_mix_get(videoInfo[serviceId], OBS_MAIN_VIDEO_RENDERING));
 
 	twitchSoundtrackEnabled = startTwitchSoundtrackAudio();
 	if (!twitchSoundtrackEnabled)
@@ -1299,11 +1302,11 @@ void OBS_service::updateAudioStreamingEncoder(bool isSimpleMode, StreamServiceId
 		enc = nullptr;
 	}
 
-	if (strstr(codec, "aac") != NULL && isSimpleMode) {
-		createAudioStreamingEncoder(serviceId, isSimpleMode);
+	if (strstr(codec, "aac") != NULL) {
+		createAudioStreamingEncoder(serviceId, isSimpleMode, ffmpeg_aac_id);
 		enc = audioStreamingEncoder[serviceId];
-	} else if (strstr(codec, "aac") != NULL && !isSimpleMode) {
-		createAudioStreamingEncoder(serviceId, isSimpleMode);
+	} else if (strstr(codec, "opus") != NULL) {
+		createAudioStreamingEncoder(serviceId, isSimpleMode, ffmpeg_opus_id);
 		enc = audioStreamingEncoder[serviceId];
 	} else {
 		uint64_t trackIndex = config_get_int(ConfigManager::getInstance().getBasic(), "AdvOut", "TrackIndex");
@@ -1320,7 +1323,7 @@ void OBS_service::updateAudioStreamingEncoder(bool isSimpleMode, StreamServiceId
 		obs_data_release(settings);
 	}
 	obs_encoder_set_audio(enc, obs_get_audio());
-
+	obs_encoder_set_video_mix(enc, obs_video_mix_get(videoInfo[serviceId], OBS_STREAMING_VIDEO_RENDERING));
 	return;
 }
 
@@ -1341,6 +1344,7 @@ void OBS_service::updateAudioRecordingEncoder(bool isSimpleMode)
 			throw std::runtime_error("Failed to create audio simple recording encoder");
 
 		obs_encoder_set_audio(audioSimpleRecordingEncoder, obs_get_audio());
+		obs_encoder_set_video_mix(audioSimpleRecordingEncoder, obs_video_mix_get(0, OBS_RECORDING_VIDEO_RENDERING));
 	} else {
 		updateRecordingAudioTracks();
 	}
@@ -1363,17 +1367,25 @@ const char *get_simple_output_encoder(const char *encoder)
 	} else if (strcmp(encoder, SIMPLE_ENCODER_X264_LOWCPU) == 0) {
 		return "obs_x264";
 	} else if (strcmp(encoder, SIMPLE_ENCODER_QSV) == 0) {
-		return "obs_qsv11";
+		return "obs_qsv11_v2";
+	} else if (strcmp(encoder, SIMPLE_ENCODER_QSV_AV1) == 0) {
+		return "obs_qsv11_av1";
 	} else if (strcmp(encoder, SIMPLE_ENCODER_AMD) == 0) {
 		return "h264_texture_amf";
 	} else if (strcmp(encoder, SIMPLE_ENCODER_AMD_HEVC) == 0) {
 		return "h265_texture_amf";
-	} else if (strcmp(encoder, SIMPLE_ENCODER_NVENC) == 0 || strcmp(encoder, "jim_nvenc") == 0) {
+	} else if (strcmp(encoder, SIMPLE_ENCODER_AMD_AV1) == 0) {
+		return "av1_texture_amf";
+	} else if (strcmp(encoder, SIMPLE_ENCODER_NVENC) == 0) {
 		return EncoderAvailable("jim_nvenc") ? "jim_nvenc" : "ffmpeg_nvenc";
 	} else if (strcmp(encoder, SIMPLE_ENCODER_NVENC_HEVC) == 0) {
 		return EncoderAvailable("jim_hevc_nvenc") ? "jim_hevc_nvenc" : "ffmpeg_hevc_nvenc";
-	} else if (strcmp(encoder, APPLE_HARDWARE_VIDEO_ENCODER_M1) == 0) {
-		return APPLE_HARDWARE_VIDEO_ENCODER_M1;
+	} else if (strcmp(encoder, SIMPLE_ENCODER_NVENC_AV1) == 0) {
+		return "jim_av1_nvenc";
+	} else if (strcmp(encoder, SIMPLE_ENCODER_APPLE_H264) == 0) {
+		return "com.apple.videotoolbox.videoencoder.ave.avc";
+	} else if (strcmp(encoder, SIMPLE_ENCODER_APPLE_HEVC) == 0) {
+		return "com.apple.videotoolbox.videoencoder.ave.hevc";
 	}
 
 	return "obs_x264";
@@ -2626,7 +2638,6 @@ void OBS_service::JSCallbackOutputSignal(void *data, calldata_t *params)
 
 void OBS_service::connectOutputSignals(StreamServiceId serviceId)
 {
-	blog(LOG_DEBUG, "connectOutputSignals ");
 	if (streamingOutput[serviceId]) {
 		signal_handler *streamingOutputSignalHandler = obs_output_get_signal_handler(streamingOutput[serviceId]);
 
@@ -2658,7 +2669,6 @@ void OBS_service::connectOutputSignals(StreamServiceId serviceId)
 					       &(replayBufferSignals.at(i)));
 		}
 	}
-	blog(LOG_DEBUG, "connectOutputSignals finished ");
 }
 
 struct HotkeyInfo {
@@ -2931,6 +2941,7 @@ bool OBS_service::startTwitchSoundtrackAudio(void)
 	}
 
 	obs_output_set_audio_encoder(streamingOutput[0], streamArchiveEncST, kSoundtrackArchiveEncoderIdx);
+	obs_encoder_set_video_mix(streamArchiveEncST, obs_video_mix_get(videoInfo[0], OBS_STREAMING_VIDEO_RENDERING));
 
 	std::string currentOutputMode = config_get_string(ConfigManager::getInstance().getBasic(), "Output", "Mode");
 	bool isSimpleMode = currentOutputMode.compare("Simple") == 0;
@@ -3027,6 +3038,7 @@ void OBS_service::setupVodTrack(bool isSimpleMode)
 				       ARCHIVE_NAME, vodTrackIndex)) {
 			obs_encoder_set_audio(streamArchiveEncVod, obs_get_audio());
 			obs_output_set_audio_encoder(streamingOutput[0], streamArchiveEncVod, 1);
+			obs_encoder_set_video_mix(streamArchiveEncVod, obs_video_mix_get(videoInfo[0], OBS_STREAMING_VIDEO_RENDERING));
 		}
 	}
 }
